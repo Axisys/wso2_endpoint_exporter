@@ -1,0 +1,45 @@
+# Example alerting rules for the wso2-endpoint-exporter metrics.
+# Load them via rule_files in prometheus.yml.
+
+groups:
+  - name: wso2-endpoint-status
+    rules:
+      # An endpoint entered the SUSPENDED state and stayed there.
+      - alert: Wso2EndpointSuspended
+        expr: wso2_endpoint_suspended == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WSO2 endpoint {{ $labels.endpoint }} is SUSPENDED"
+          description: >-
+            Endpoint {{ $labels.endpoint }} ({{ $labels.address }}) has been
+            marked SUSPENDED in Loki logs and is still considered suspended.
+
+      # The exporter stopped talking to Loki - the table may be stale.
+      - alert: Wso2EndpointExporterStale
+        expr: wso2_exporter_poll_success == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wso2-endpoint-exporter cannot poll Loki"
+          description: "The last Loki polls failed for more than 5 minutes."
+
+      # No successful poll for 10 minutes (covers a hung exporter as well).
+      - alert: Wso2EndpointExporterNoData
+        expr: (time() - wso2_exporter_last_success_timestamp_seconds) > 600
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "wso2-endpoint-exporter data is older than 10 minutes"
+
+      # Optional: an endpoint is flapping (suspension events keep coming in).
+      - alert: Wso2EndpointFlapping
+        expr: sum by (endpoint) (increase(wso2_endpoint_suspension_events_total[30m])) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "WSO2 endpoint {{ $labels.endpoint }} keeps failing"
+          description: "More than 5 suspension events in the last 30 minutes."

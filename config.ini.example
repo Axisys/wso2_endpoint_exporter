@@ -1,0 +1,97 @@
+# =============================================================================
+# wso2-endpoint-exporter - configuration
+# Copy to config.ini and adjust. INI format, parsed by Python configparser.
+# Only the Python standard library is used at runtime.
+# =============================================================================
+
+[loki]
+# Loki query API base URL (no trailing slash needed).
+url = https://mobius.ganymede.com:3100
+
+# LogQL query that returns the "endpoint will be marked SUSPENDED" warnings.
+# Must return raw log streams (no aggregation operators such as sum/count).
+query = {job="wso2logs-os",level="WARN"} |= "will be marked SUSPENDED as it failed"
+
+# Optional second query for the "endpoint is ACTIVE again" lines. Used only in
+# mode = state. Leave empty if your Loki has no such messages; in that case the
+# state expires after state_ttl_seconds instead.
+#resume_query = {job="wso2logs-os"} |~ "(?i)marked ACTIVE|suspension period has ended"
+
+# Maximum number of log entries returned per request.
+limit = 5000
+
+# HTTP timeout for Loki requests, seconds.
+timeout_seconds = 30
+
+# TLS verification. Set to true and point ca_bundle to your CA certificate if
+# Loki uses HTTPS with a private CA.
+verify_tls = false
+#ca_bundle = /etc/ssl/certs/corp-ca.pem
+
+# Authentication: either basic auth or a bearer token (bearer wins).
+#username = loki-reader
+#password = secret
+#bearer_token = eyJhbGciOi...
+
+# Extra HTTP headers, one per line: "Name: value".
+# Useful for multi-tenant Loki (X-Scope-OrgID) or corporate proxies.
+#extra_headers =
+#    X-Scope-OrgID: fake
+
+[parse]
+# Regular expressions that extract endpoint data from a log line.
+# Each regex MUST contain the named group (?P<endpoint>...) and may contain
+# (?P<address>...).
+suspend_regex = Endpoint\s*:\s*(?P<endpoint>\S+)\s+with\s+address\s+(?P<address>\S+)\s+will\s+be\s+marked\s+SUSPENDED
+resume_regex = Endpoint\s*:\s*(?P<endpoint>\S+)\s+with\s+address\s+(?P<address>\S+)\s+[^\n]*?\bACTIVE\b
+
+[exporter]
+# Where the built-in HTTP server listens. Keep 127.0.0.1 if Prometheus runs on
+# the same host (recommended); use a LAN address only if it does not.
+listen_host = 127.0.0.1
+listen_port = 9187
+
+# How often Loki is queried, seconds.
+poll_interval_seconds = 60
+
+# Sliding look-back window that defines the SUSPENDED gauge:
+#   mode = window : the gauge is 1 if a suspension event happened within the
+#                   last window_seconds, else 0 (exactly the behaviour of
+#                   "did it appear in the log in the last 60 seconds").
+#   mode = state  : the gauge is 1 from the suspension event until a resume
+#                   event (resume_query) or state_ttl_seconds expires.
+mode = window
+window_seconds = 60
+
+# mode = state only: auto-expire a SUSPENDED state after this many seconds
+# without new suspension events (0 disables the TTL).
+state_ttl_seconds = 86400
+
+# How far back the startup look-back goes to populate the endpoint table and
+# the events counter before the first window poll (hours, 0 disables).
+history_hours = 168
+
+# Where the exporter keeps its state between restarts (JSON). Leave empty to
+# disable persistence. Use an absolute path under systemd, e.g.
+# /var/lib/wso2-endpoint-exporter/state.json
+state_file = state.json
+
+# The metrics text is also written to disk after every successful poll
+# (handy for debugging; Prometheus scrapes http://.../metrics, not this file).
+metrics_file = metrics.prom
+
+# Endpoints that are known but may never appear in the logs. Without them a
+# never-failing endpoint simply has no metric sample. Lines may also be kept in
+# a separate file (CSV: endpoint[,address]) and referenced via known_endpoints_file.
+#known_endpoints = UPC_CFT_EP=http://localhost:8280/services/UPC_Gateway_DataService,DVNOK_CFT_EP, DBZ_AnyWaySOAP2
+#known_endpoints_file = /etc/wso2-endpoint-exporter/endpoints.csv
+
+# Metric names. The 'endpoint' and 'address' labels are always attached.
+# NOTE: do not add a 'job' label here - Prometheus attaches job/job_name from
+# the scrape configuration automatically.
+metric_suspended = wso2_endpoint_suspended
+metric_last_suspended_timestamp_seconds = wso2_endpoint_last_suspended_timestamp_seconds
+metric_events_total = wso2_endpoint_suspension_events_total
+
+# DEBUG, INFO, WARNING, ERROR
+log_level = INFO

@@ -1,0 +1,27 @@
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Python files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Secrets and configuration
+.env
+*.key
+config_secret.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build artifacts / tooling
+build/
+dist/
+*.egg-info/
+.pytest_cache/

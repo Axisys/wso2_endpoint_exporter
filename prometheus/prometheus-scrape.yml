@@ -1,0 +1,21 @@
+# Snippet: add to the scrape_configs section of prometheus.yml.
+#
+# The exporter refreshes its table every 60 s, so scraping more often than
+# 30 s just re-reads the same snapshot. The 'job' label seen in Grafana comes
+# from job_name here - it is NOT baked into the metric itself.
+
+scrape_configs:
+  - job_name: wso2-endpoint-status
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:9187"]
+        labels:
+          env: dev
+          # free-form label to distinguish several MI servers, if needed:
+          # mi_server: wso2-dev-01
+
+# If Prometheus runs on another host, replace 127.0.0.1 with the exporter
+# host and set listen_host in config.ini accordingly. Prefer a firewall /
+# security-group restriction to the Prometheus IP over exposing it widely.

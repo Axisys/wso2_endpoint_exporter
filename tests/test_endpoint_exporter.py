@@ -1,0 +1,417 @@
+"""Tests for endpoint_exporter.py (stdlib unittest, no external deps).
+
+Run from the project root:
+    python -m unittest discover -s tests -v
+"""
+
+import json
+import pathlib
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+import endpoint_exporter as ee  # noqa: E402
+
+
+SAMPLE_LINES = [
+    "[2026-10-27 14:31:41,579]  WARN {org.apache.synapse.endpoints.EndpointContext} - Endpoint : UPC_CFT_EP with address http://localhost:8280/services/UPC_Gateway_DataService will be marked SUSPENDED as it failed ",
+    "[2026-10-27 14:30:37,335]  WARN {org.apache.synapse.endpoints.EndpointContext} - Endpoint : UPC_CFT_EP with address http://localhost:8280/services/UPC_Gateway_DataService will be marked SUSPENDED as it failed ",
+    "[2026-10-27 14:30:19,171]  WARN {org.apache.synapse.endpoints.EndpointContext} - Endpoint : DVNOK_CFT_EP with address http://localhost:8280/services/DVN_OK_DataService will be marked SUSPENDED as it failed ",
+    "[2026-10-27 14:21:07,874]  WARN {org.apache.synapse.endpoints.EndpointContext} - Endpoint : DBZ_AnyWaySOAP2 with address https://anyc2b-p.zenit.ru:443/csp/awl/AWGW.WS.cls will be marked SUSPENDED as it failed ",
+]
+
+RESUME_LINE = (
+    "[2026-10-27 14:35:00,000]  INFO {org.apache.synapse.endpoints.EndpointContext} - "
+    "Endpoint : UPC_CFT_EP with address http://localhost:8280/services/UPC_Gateway_DataService "
+    "will be marked ACTIVE as it has been suspended for 60000 ms"
+)
+
+
+def now_ns():
+    return int(time.time() * 1_000_000_000)
+
+
+class FakeLokiHandler(BaseHTTPRequestHandler):
+    """Minimal Loki query_range API returning canned entries."""
+
+    entries = []          # [(ts_ns, line)]
+    resume_entries = []   # [(ts_ns, line)]
+    fail_next = 0         # respond 500 that many times
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        if parsed.path != "/loki/api/v1/query_range":
+            self.send_error(404)
+            return
+        if FakeLokiHandler.fail_next > 0:
+            FakeLokiHandler.fail_next -= 1
+            self.send_error(500, "boom")
+            return
+
+        query = params.get("query", [""])[0]
+        start = int(params.get("start", ["0"])[0])
+        end = int(params.get("end", ["0"])[0])
+        source = FakeLokiHandler.resume_entries if "ACTIVE" in query else FakeLokiHandler.entries
+        values = [[str(ts), line] for ts, line in source if start <= ts <= end]
+        body = json.dumps(
+            {
+                "status": "success",
+                "data": {
+                    "resultType": "streams",
+                    "result": [{"stream": {"job": "wso2logs-os"}, "values": values}],
+                },
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class FakeLoki:
+    def __init__(self):
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeLokiHandler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.port}"
+
+
+def make_settings(**overrides):
+    base = dict(
+        loki_url="http://127.0.0.1:1",
+        mode="window",
+        window_seconds=60.0,
+        poll_interval_seconds=60.0,
+        history_hours=0.0,
+        state_file="",
+        metrics_file="",
+    )
+    base.update(overrides)
+    return ee.Settings(**base)
+
+
+class ParseTests(unittest.TestCase):
+    def test_suspend_lines_are_parsed(self):
+        store = ee.Store(make_settings())
+        events = store.parse_events(
+            [(now_ns(), line) for line in SAMPLE_LINES], "suspend"
+        )
+        self.assertEqual(len(events), 4)
+        names = [event[1] for event in events]
+        self.assertEqual(
+            names, ["UPC_CFT_EP", "UPC_CFT_EP", "DVNOK_CFT_EP", "DBZ_AnyWaySOAP2"]
+        )
+        self.assertEqual(
+            events[3][2], "https://anyc2b-p.zenit.ru:443/csp/awl/AWGW.WS.cls"
+        )
+
+    def test_unrelated_lines_are_ignored(self):
+        store = ee.Store(make_settings())
+        events = store.parse_events(
+            [(now_ns(), "[2026-10-27 10:00:00,000] INFO something else entirely")],
+            "suspend",
+        )
+        self.assertEqual(events, [])
+
+    def test_resume_line_is_parsed(self):
+        store = ee.Store(make_settings(mode="state"))
+        events = store.parse_events([(now_ns(), RESUME_LINE)], "resume")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1], "UPC_CFT_EP")
+        self.assertEqual(events[0][3], "resume")
+
+    def test_missing_named_group_is_rejected(self):
+        with self.assertRaises(ee.ConfigError):
+            ee._check_regex(r"Endpoint : (\S+)", "suspend_regex")
+
+
+class WindowModeTests(unittest.TestCase):
+    def test_status_is_one_only_inside_window(self):
+        store = ee.Store(make_settings())
+        store.ensure_known_endpoints()
+        ts = now_ns()
+        events = store.parse_events([(ts, SAMPLE_LINES[0])], "suspend")
+        store.reset_window()
+        store.apply_events(events, in_window=True)
+        metrics = store.render_metrics()
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 1',
+            metrics,
+        )
+
+    def test_status_falls_back_to_zero_without_events(self):
+        store = ee.Store(make_settings())
+        store.ensure_known_endpoints()
+        events = store.parse_events([(now_ns(), SAMPLE_LINES[2])], "suspend")
+        store.reset_window()
+        store.apply_events(events, in_window=True)
+        self.assertIn('endpoint="DVNOK_CFT_EP"', store.render_metrics())
+        # next window has no events -> gauge must be 0
+        store.reset_window()
+        store.apply_events([], in_window=True)
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="DVNOK_CFT_EP",'
+            'address="http://localhost:8280/services/DVN_OK_DataService"} 0',
+            store.render_metrics(),
+        )
+
+    def test_known_endpoints_are_exported_with_zero(self):
+        settings = make_settings(
+            known_endpoints=[("UPC_CFT_EP", "http://localhost:8280/services/UPC_Gateway_DataService")]
+        )
+        store = ee.Store(settings)
+        store.ensure_known_endpoints()
+        metrics = store.render_metrics()
+        self.assertIn('endpoint="UPC_CFT_EP"', metrics)
+        self.assertIn("wso2_exporter_known_endpoints 1", metrics)
+
+    def test_history_events_do_not_set_window_flag(self):
+        store = ee.Store(make_settings())
+        events = store.parse_events([(now_ns(), SAMPLE_LINES[0])], "suspend")
+        store.reset_window()
+        store.apply_events(events, in_window=False)
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 0',
+            store.render_metrics(),
+        )
+
+    def test_duplicates_are_counted_once(self):
+        store = ee.Store(make_settings())
+        ts = now_ns()
+        events = store.parse_events([(ts, SAMPLE_LINES[0]), (ts, SAMPLE_LINES[0])], "suspend")
+        self.assertEqual(store.apply_events(events, in_window=True), 1)
+        self.assertEqual(store.apply_events(events, in_window=True), 0)
+        self.assertIn("wso2_endpoint_suspension_events_total{", store.render_metrics())
+        self.assertRegex(
+            store.render_metrics(),
+            r'wso2_endpoint_suspension_events_total\{endpoint="UPC_CFT_EP",address="[^"]+"\} 1\n',
+        )
+
+
+class StateModeTests(unittest.TestCase):
+    def test_suspend_then_resume(self):
+        store = ee.Store(make_settings(mode="state"))
+        suspend = store.parse_events([(now_ns(), SAMPLE_LINES[0])], "suspend")
+        store.apply_events(suspend, in_window=False)
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 1',
+            store.render_metrics(),
+        )
+        resume = store.parse_events([(now_ns(), RESUME_LINE)], "resume")
+        store.apply_events(resume, in_window=False)
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 0',
+            store.render_metrics(),
+        )
+
+    def test_state_expires_by_ttl(self):
+        store = ee.Store(make_settings(mode="state", state_ttl_seconds=3600.0))
+        suspend = store.parse_events([(now_ns(), SAMPLE_LINES[0])], "suspend")
+        store.apply_events(suspend, in_window=False)
+        info = store.endpoints["UPC_CFT_EP"]
+        info.last_suspended_ts -= 7200  # two hours ago
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 0',
+            store.render_metrics(),
+        )
+
+
+class RenderingTests(unittest.TestCase):
+    def test_label_values_are_escaped(self):
+        store = ee.Store(make_settings())
+        store.apply_events([(now_ns(), 'a"b\\c', "x", "suspend")], in_window=True)
+        metrics = store.render_metrics()
+        self.assertIn('endpoint="a\\"b\\\\c"', metrics)
+
+    def test_html_page_renders(self):
+        store = ee.Store(make_settings())
+        events = store.parse_events([(now_ns(), SAMPLE_LINES[0])], "suspend")
+        store.apply_events(events, in_window=True)
+        page = store.render_html()
+        self.assertIn("UPC_CFT_EP", page)
+        self.assertIn("SUSPENDED", page)
+
+    def test_state_json_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = str(pathlib.Path(tmp) / "state.json")
+            store = ee.Store(make_settings(state_file=state_path))
+            events = store.parse_events([(now_ns(), SAMPLE_LINES[0])], "suspend")
+            store.apply_events(events, in_window=True)
+            store.save_state()
+            restored = ee.Store(make_settings(state_file=state_path))
+            restored.load_state()
+            self.assertIn("UPC_CFT_EP", restored.endpoints)
+            self.assertEqual(restored.endpoints["UPC_CFT_EP"].events_total, 1)
+
+
+class EndToEndTests(unittest.TestCase):
+    def setUp(self):
+        FakeLokiHandler.entries = []
+        FakeLokiHandler.resume_entries = []
+        FakeLokiHandler.fail_next = 0
+        self.loki = FakeLoki()
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.loki.stop()
+        self.tmp.cleanup()
+
+    def _settings(self, **overrides):
+        base = dict(
+            loki_url=self.loki.url,
+            mode="window",
+            window_seconds=60.0,
+            history_hours=0.0,
+            state_file=str(pathlib.Path(self.tmp.name) / "state.json"),
+            metrics_file=str(pathlib.Path(self.tmp.name) / "metrics.prom"),
+        )
+        base.update(overrides)
+        return ee.Settings(**base)
+
+    def test_poll_builds_window_status(self):
+        FakeLokiHandler.entries = [
+            (now_ns() - 5_000_000_000, SAMPLE_LINES[0]),
+            (now_ns() - 4_000_000_000, SAMPLE_LINES[2]),
+        ]
+        settings = self._settings()
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        self.assertTrue(exporter.poll())
+        metrics = store.render_metrics()
+        self.assertIn('endpoint="UPC_CFT_EP",address="http://localhost:8280/services/UPC_Gateway_DataService"} 1', metrics)
+        self.assertIn('endpoint="DVNOK_CFT_EP",address="http://localhost:8280/services/DVN_OK_DataService"} 1', metrics)
+        self.assertIn("wso2_exporter_poll_success 1", metrics)
+        # metrics snapshot is written to disk for debugging
+        written = pathlib.Path(settings.metrics_file).read_text(encoding="utf-8")
+        self.assertIn("wso2_endpoint_suspended", written)
+
+    def test_poll_failure_keeps_last_snapshot(self):
+        FakeLokiHandler.entries = [(now_ns(), SAMPLE_LINES[0])]
+        settings = self._settings()
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        self.assertTrue(exporter.poll())
+        FakeLokiHandler.fail_next = 1
+        self.assertFalse(exporter.poll())
+        metrics = store.render_metrics()
+        self.assertIn("wso2_exporter_poll_success 0", metrics)
+        self.assertIn("wso2_exporter_loki_errors_total 1", metrics)
+        # previous window data is still served
+        self.assertIn('endpoint="UPC_CFT_EP",address="http://localhost:8280/services/UPC_Gateway_DataService"} 1', metrics)
+
+    def test_state_mode_poll_handles_resume(self):
+        FakeLokiHandler.entries = [(now_ns(), SAMPLE_LINES[0])]
+        FakeLokiHandler.resume_entries = [(now_ns(), RESUME_LINE)]
+        settings = self._settings(
+            mode="state",
+            loki_resume_query='{job="wso2logs-os"} |~ "ACTIVE"',
+        )
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        self.assertTrue(exporter.poll())
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 0',
+            store.render_metrics(),
+        )
+
+    def test_history_priming_populates_inventory(self):
+        FakeLokiHandler.entries = [(now_ns() - 3600 * 1_000_000_000, SAMPLE_LINES[3])]
+        settings = self._settings(history_hours=24.0)
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        exporter.prime_history()
+        self.assertIn("DBZ_AnyWaySOAP2", store.endpoints)
+        # priming must not set the current window flag
+        self.assertIn('endpoint="DBZ_AnyWaySOAP2",address="https://anyc2b-p.zenit.ru:443/csp/awl/AWGW.WS.cls"} 0', store.render_metrics())
+
+    def test_http_endpoints(self):
+        FakeLokiHandler.entries = [(now_ns(), SAMPLE_LINES[0])]
+        settings = self._settings()
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        self.assertTrue(exporter.poll())
+
+        handler = ee.make_handler(exporter)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics") as resp:
+                body = resp.read().decode("utf-8")
+                self.assertEqual(resp.status, 200)
+                self.assertIn("text/plain", resp.headers["Content-Type"])
+            self.assertIn("wso2_endpoint_suspended", body)
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/") as resp:
+                self.assertIn("UPC_CFT_EP", resp.read().decode("utf-8"))
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/state.json") as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                self.assertIn("UPC_CFT_EP", payload["endpoints"])
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health") as resp:
+                self.assertEqual(resp.status, 200)
+
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/nope")
+            self.assertEqual(ctx.exception.code, 404)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class ConfigTests(unittest.TestCase):
+    def test_example_config_is_valid(self):
+        example = pathlib.Path(__file__).resolve().parents[1] / "config.ini.example"
+        settings = ee.load_config(str(example))
+        self.assertEqual(settings.mode, "window")
+        self.assertEqual(settings.listen_host, "127.0.0.1")
+        self.assertTrue(settings.loki_query.startswith("{"))
+
+    def test_bad_mode_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "config.ini"
+            path.write_text("[exporter]\nmode = nonsense\n", encoding="utf-8")
+            with self.assertRaises(ee.ConfigError):
+                ee.load_config(str(path))
+
+    def test_missing_named_group_is_rejected_in_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "config.ini"
+            path.write_text(
+                "[parse]\nsuspend_regex = Endpoint : (?P<name>\\S+)\n", encoding="utf-8"
+            )
+            with self.assertRaises(ee.ConfigError):
+                ee.load_config(str(path))
+
+
+if __name__ == "__main__":
+    unittest.main()

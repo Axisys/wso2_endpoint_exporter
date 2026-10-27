@@ -1,0 +1,32 @@
+[Unit]
+Description=WSO2 endpoint status exporter (Grafana Loki -> Prometheus)
+Documentation=file:/opt/wso2-endpoint-exporter/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged user; create it once with:
+#   sudo useradd --system --home /var/lib/wso2-endpoint-exporter --shell /usr/sbin/nologin wso2-exporter
+User=wso2-exporter
+Group=wso2-exporter
+
+WorkingDirectory=/opt/wso2-endpoint-exporter
+ExecStart=/usr/bin/python3 /opt/wso2-endpoint-exporter/endpoint_exporter.py --config /etc/wso2-endpoint-exporter/config.ini
+
+Restart=always
+RestartSec=10
+
+# The exporter only needs the config (read), the code (read) and its own
+# state directory (write). Logs go to the journal via stdout/stderr.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/wso2-endpoint-exporter
+
+[Install]
+WantedBy=multi-user.target
