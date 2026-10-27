@@ -32,9 +32,11 @@ sudo chown -R wso2-exporter:wso2-exporter /var/lib/wso2-endpoint-exporter
 sudo -u wso2-exporter python3 /opt/wso2-endpoint-exporter/endpoint_exporter.py \
      --config /etc/wso2-endpoint-exporter/config.ini --check
 
-# one-shot run: prints the exact /metrics output to stdout
+# one-shot run: prints the exact /metrics output to stdout (it also updates
+# state_file / metrics_file, so run it as the service user)
 sudo -u wso2-exporter python3 /opt/wso2-endpoint-exporter/endpoint_exporter.py \
-     --config /etc/wso2-endpoint-exporter/config.ini --once | head -30
+     --config /etc/wso2-endpoint-exporter/config.ini --once > /tmp/wso2-metrics.txt
+head -30 /tmp/wso2-metrics.txt
 
 # systemd
 sudo cp systemd/wso2-endpoint-exporter.service /etc/systemd/system/
@@ -64,6 +66,12 @@ The main gauge has two working modes (`[exporter] mode`):
 |------|---------|---------|
 | `window` (default) | a suspension event appeared in the log within the last `window_seconds` (60 s) | no suspension event in that window |
 | `state` | the endpoint was marked SUSPENDED and no recovery was seen yet | a "back to ACTIVE" line was seen (`resume_query`) or `state_ttl_seconds` passed |
+
+Every Loki query looks back `window_seconds + window_overlap_seconds`, so
+neighbouring queries overlap and a slow poll cannot leave a gap. Duplicate log
+lines are recognised by their timestamps and counted once. In `window` mode the
+gauge also ages out on its own: if Loki becomes unreachable, an old
+"SUSPENDED" is not displayed forever.
 
 **Read this before choosing.** `window` answers "did it fail in the last
 minute?". A dead endpoint that stopped producing log lines (no traffic, or a
@@ -146,7 +154,11 @@ Only section summary here:
 |---------|--------------|
 | `[loki]` | `url`, `query` (LogQL for suspensions), `resume_query`, `limit`, `timeout_seconds`, `verify_tls`, `ca_bundle`, `username`/`password`, `bearer_token`, `extra_headers` (e.g. `X-Scope-OrgID`) |
 | `[parse]` | `suspend_regex`, `resume_regex` - must contain named group `(?P<endpoint>...)`, optionally `(?P<address>...)` |
-| `[exporter]` | `listen_host`/`listen_port`, `poll_interval_seconds`, `mode`, `window_seconds`, `state_ttl_seconds`, `history_hours`, `state_file`, `metrics_file`, `known_endpoints`, metric names, `log_level` |
+| `[exporter]` | `listen_host`/`listen_port`, `poll_interval_seconds`, `mode`, `window_seconds`, `window_overlap_seconds`, `state_ttl_seconds`, `history_hours`, `state_file`, `metrics_file`, `known_endpoints`, metric names, `log_level` |
+
+`state_file` and `metrics_file` must point to a writable directory when the
+service runs under the shipped systemd unit: `ProtectSystem=strict` leaves only
+`/var/lib/wso2-endpoint-exporter` writable (`StateDirectory=` in the unit).
 
 The default LogQL is the one you already use in Grafana Explore:
 
@@ -242,6 +254,7 @@ round-trip, HTTP endpoints and failure handling.
 | gauge stuck at 1 in `state` mode | no recovery lines matched - configure `resume_query` or rely on `state_ttl_seconds` |
 | `unsupported Loki resultType` in the log | the LogQL query aggregates (e.g. `count_over_time`); use a raw stream query |
 | truncation warning in the log | raise `[loki] limit` |
+| `cannot write state.json: Read-only file system` | make `state_file`/`metrics_file` absolute paths under `/var/lib/wso2-endpoint-exporter` (or set `StateDirectory=`/`ReadWritePaths=` in the unit) |
 | Prometheus target down | exporter bound to `127.0.0.1` while Prometheus is remote - change `listen_host` |
 
 Manual check from the Prometheus host:

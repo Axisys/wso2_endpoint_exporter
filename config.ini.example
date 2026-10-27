@@ -63,6 +63,11 @@ poll_interval_seconds = 60
 mode = window
 window_seconds = 60
 
+# Extra look-back added to every Loki query. Windows then overlap slightly, so
+# a slow poll or a little clock drift cannot leave a gap in which suspension
+# events are never queried. Duplicates are ignored by the exporter.
+window_overlap_seconds = 10
+
 # mode = state only: auto-expire a SUSPENDED state after this many seconds
 # without new suspension events (0 disables the TTL).
 state_ttl_seconds = 86400
@@ -72,13 +77,13 @@ state_ttl_seconds = 86400
 history_hours = 168
 
 # Where the exporter keeps its state between restarts (JSON). Leave empty to
-# disable persistence. Use an absolute path under systemd, e.g.
-# /var/lib/wso2-endpoint-exporter/state.json
-state_file = state.json
+# disable persistence. Use absolute paths (the shipped systemd unit runs with
+# ProtectSystem=strict, so only /var/lib/wso2-endpoint-exporter is writable).
+state_file = /var/lib/wso2-endpoint-exporter/state.json
 
 # The metrics text is also written to disk after every successful poll
 # (handy for debugging; Prometheus scrapes http://.../metrics, not this file).
-metrics_file = metrics.prom
+metrics_file = /var/lib/wso2-endpoint-exporter/metrics.prom
 
 # Endpoints that are known but may never appear in the logs. Without them a
 # never-failing endpoint simply has no metric sample. Lines may also be kept in

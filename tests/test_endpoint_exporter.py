@@ -111,6 +111,17 @@ def make_settings(**overrides):
     return ee.Settings(**base)
 
 
+class CapturingLokiClient:
+    """Loki client stub: records query ranges and returns no entries."""
+
+    def __init__(self):
+        self.calls = []
+
+    def query_range(self, logql, start_ns, end_ns):
+        self.calls.append((logql, start_ns, end_ns))
+        return []
+
+
 class ParseTests(unittest.TestCase):
     def test_suspend_lines_are_parsed(self):
         store = ee.Store(make_settings())
@@ -210,6 +221,36 @@ class WindowModeTests(unittest.TestCase):
             r'wso2_endpoint_suspension_events_total\{endpoint="UPC_CFT_EP",address="[^"]+"\} 1\n',
         )
 
+    def test_window_status_expires_without_new_events(self):
+        store = ee.Store(make_settings())
+        ts = now_ns()
+        store.apply_events(store.parse_events([(ts, SAMPLE_LINES[0])], "suspend"), in_window=True)
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 1',
+            store.render_metrics(),
+        )
+        # simulate a prolonged Loki outage: no new poll, but time passes
+        store.endpoints["UPC_CFT_EP"].window_last_event_ts -= 120
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 0',
+            store.render_metrics(),
+        )
+
+    def test_event_inside_overlap_does_not_set_window_status(self):
+        store = ee.Store(make_settings())  # window_seconds = 60
+        old_ns = now_ns() - 90_000_000_000  # older than the window
+        applied = store.apply_events(
+            store.parse_events([(old_ns, SAMPLE_LINES[0])], "suspend"), in_window=True
+        )
+        self.assertEqual(applied, 1)  # still counted in events_total
+        self.assertIn(
+            'wso2_endpoint_suspended{endpoint="UPC_CFT_EP",'
+            'address="http://localhost:8280/services/UPC_Gateway_DataService"} 0',
+            store.render_metrics(),
+        )
+
 
 class StateModeTests(unittest.TestCase):
     def test_suspend_then_resume(self):
@@ -240,6 +281,29 @@ class StateModeTests(unittest.TestCase):
             'address="http://localhost:8280/services/UPC_Gateway_DataService"} 0',
             store.render_metrics(),
         )
+
+    def test_reload_does_not_recount_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = str(pathlib.Path(tmp) / "state.json")
+            settings = make_settings(mode="state", state_file=state_path)
+            ts = now_ns()
+            store = ee.Store(settings)
+            events = store.parse_events([(ts, SAMPLE_LINES[0])], "suspend")
+            self.assertEqual(store.apply_events(events, in_window=False), 1)
+            store.save_state()
+
+            restored = ee.Store(settings)
+            restored.load_state()
+            self.assertEqual(restored.endpoints["UPC_CFT_EP"].events_total, 1)
+            # re-reading the same history after a restart must not count it twice
+            self.assertEqual(
+                restored.apply_events(
+                    restored.parse_events([(ts, SAMPLE_LINES[0])], "suspend"),
+                    in_window=False,
+                ),
+                0,
+            )
+            self.assertEqual(restored.endpoints["UPC_CFT_EP"].events_total, 1)
 
 
 class RenderingTests(unittest.TestCase):
@@ -351,6 +415,32 @@ class EndToEndTests(unittest.TestCase):
         # priming must not set the current window flag
         self.assertIn('endpoint="DBZ_AnyWaySOAP2",address="https://anyc2b-p.zenit.ru:443/csp/awl/AWGW.WS.cls"} 0', store.render_metrics())
 
+    def test_restart_priming_does_not_inflate_counter(self):
+        FakeLokiHandler.entries = [(now_ns() - 3600 * 1_000_000_000, SAMPLE_LINES[0])]
+        settings = self._settings(history_hours=24.0)
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        exporter.prime_history()
+        self.assertTrue(exporter.poll())
+        self.assertEqual(store.endpoints["UPC_CFT_EP"].events_total, 1)
+
+        # a restart re-reads the same history; the counter must not grow
+        restored = ee.Store(settings)
+        restored.load_state()
+        exporter = ee.Exporter(settings, restored, ee.LokiClient(settings))
+        exporter.prime_history()
+        self.assertTrue(exporter.poll())
+        self.assertEqual(restored.endpoints["UPC_CFT_EP"].events_total, 1)
+
+    def test_poll_query_includes_overlap(self):
+        settings = make_settings(window_seconds=60.0, window_overlap_seconds=15.0)
+        store = ee.Store(settings)
+        client = CapturingLokiClient()
+        exporter = ee.Exporter(settings, store, client)
+        self.assertTrue(exporter.poll())
+        _query, start_ns, end_ns = client.calls[0]
+        self.assertGreaterEqual((end_ns - start_ns) / 1e9, 74.9)
+
     def test_http_endpoints(self):
         FakeLokiHandler.entries = [(now_ns(), SAMPLE_LINES[0])]
         settings = self._settings()
@@ -411,6 +501,21 @@ class ConfigTests(unittest.TestCase):
             )
             with self.assertRaises(ee.ConfigError):
                 ee.load_config(str(path))
+
+    def test_invalid_log_level_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "config.ini"
+            path.write_text("[exporter]\nlog_level = verbose\n", encoding="utf-8")
+            with self.assertRaises(ee.ConfigError):
+                ee.load_config(str(path))
+
+    def test_malformed_state_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "state.json"
+            path.write_text("[1, 2, 3]", encoding="utf-8")
+            store = ee.Store(make_settings(state_file=str(path)))
+            store.load_state()
+            self.assertEqual(store.endpoints, {})
 
 
 if __name__ == "__main__":

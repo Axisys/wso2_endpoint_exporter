@@ -4,17 +4,21 @@
 groups:
   - name: wso2-endpoint-status
     rules:
-      # An endpoint entered the SUSPENDED state and stayed there.
+      # An endpoint was marked SUSPENDED and has not recovered yet.
+      # NOTE: in mode = window the gauge is 1 only while a suspension event is
+      # inside window_seconds, so a long "for:" would hide single failures.
+      # With mode = state a "for:" of 1-2m is fine instead.
       - alert: Wso2EndpointSuspended
         expr: wso2_endpoint_suspended == 1
-        for: 2m
+        for: 0m
         labels:
           severity: warning
         annotations:
           summary: "WSO2 endpoint {{ $labels.endpoint }} is SUSPENDED"
           description: >-
-            Endpoint {{ $labels.endpoint }} ({{ $labels.address }}) has been
-            marked SUSPENDED in Loki logs and is still considered suspended.
+            Endpoint {{ $labels.endpoint }} ({{ $labels.address }}) was marked
+            SUSPENDED in the Loki logs and is still considered suspended by the
+            exporter.
 
       # The exporter stopped talking to Loki - the table may be stale.
       - alert: Wso2EndpointExporterStale

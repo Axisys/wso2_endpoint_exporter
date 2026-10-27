@@ -11,7 +11,7 @@ Type=simple
 User=wso2-exporter
 Group=wso2-exporter
 
-WorkingDirectory=/opt/wso2-endpoint-exporter
+WorkingDirectory=/var/lib/wso2-endpoint-exporter
 ExecStart=/usr/bin/python3 /opt/wso2-endpoint-exporter/endpoint_exporter.py --config /etc/wso2-endpoint-exporter/config.ini
 
 Restart=always
@@ -26,7 +26,8 @@ PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-ReadWritePaths=/var/lib/wso2-endpoint-exporter
+# Created automatically with the right ownership and implicitly writable.
+StateDirectory=wso2-endpoint-exporter
 
 [Install]
 WantedBy=multi-user.target

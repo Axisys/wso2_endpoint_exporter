@@ -340,16 +340,21 @@
               },
               {
                 "id": "mappings",
-                "options": {
-                  "0": {
-                    "color": "green",
-                    "text": "ACTIVE"
-                  },
-                  "1": {
-                    "color": "red",
-                    "text": "SUSPENDED"
+                "options": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "color": "green",
+                        "text": "ACTIVE"
+                      },
+                      "1": {
+                        "color": "red",
+                        "text": "SUSPENDED"
+                      }
+                    }
                   }
-                }
+                ]
               }
             ]
           },

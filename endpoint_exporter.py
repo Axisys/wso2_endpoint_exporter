@@ -45,7 +45,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Sequence, Tuple
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 LOG = logging.getLogger("wso2-endpoint-exporter")
 
@@ -70,6 +70,16 @@ DEFAULT_RESUME_REGEX = (
 )
 
 METRIC_NAME_RE = re.compile(r"[a-zA-Z_:][a-zA-Z0-9_:]*\Z")
+
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _int_or(value: object, default: int) -> int:
+    """Best-effort int conversion for values read back from state.json."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 class ConfigError(RuntimeError):
@@ -112,6 +122,9 @@ class Settings:
     listen_port: int = 9187
     poll_interval_seconds: float = 60.0
     window_seconds: float = 60.0
+    # Extra look-back added to every query so that clock drift or a slow poll
+    # cannot fall into a gap between two polling windows.
+    window_overlap_seconds: float = 10.0
     mode: str = "window"  # window | state
     state_ttl_seconds: float = 86400.0
     history_hours: float = 168.0
@@ -193,7 +206,7 @@ def load_config(path: str) -> Settings:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             parser.read_file(handle)
-    except (OSError, configparser.Error) as exc:
+    except (OSError, UnicodeDecodeError, configparser.Error) as exc:
         raise ConfigError(f"cannot read config file {path!r}: {exc}") from exc
 
     def get(section: str, key: str, default: str) -> str:
@@ -254,6 +267,9 @@ def load_config(path: str) -> Settings:
     settings.window_seconds = get_float(
         "exporter", "window_seconds", settings.window_seconds
     )
+    settings.window_overlap_seconds = get_float(
+        "exporter", "window_overlap_seconds", settings.window_overlap_seconds
+    )
     settings.mode = get("exporter", "mode", settings.mode).strip().lower()
     settings.state_ttl_seconds = get_float(
         "exporter", "state_ttl_seconds", settings.state_ttl_seconds
@@ -302,8 +318,14 @@ def load_config(path: str) -> Settings:
         raise ConfigError("[exporter] poll_interval_seconds must be positive")
     if settings.window_seconds <= 0:
         raise ConfigError("[exporter] window_seconds must be positive")
+    if settings.window_overlap_seconds < 0:
+        raise ConfigError("[exporter] window_overlap_seconds must be >= 0")
     if settings.mode not in ("window", "state"):
         raise ConfigError("[exporter] mode must be 'window' or 'state'")
+    if settings.log_level not in LOG_LEVELS:
+        raise ConfigError(
+            "[exporter] log_level must be one of " + ", ".join(LOG_LEVELS)
+        )
     if settings.mode == "state" and not settings.loki_resume_query:
         LOG.warning(
             "mode=state but [loki] resume_query is empty: endpoints will only leave "
@@ -439,6 +461,14 @@ class EndpointInfo:
     events_total: int = 0
     suspended: bool = False  # state mode: last event was "SUSPENDED"
     window_suspended: bool = False  # window mode: event seen in the current window
+    # Timestamps (unix nanoseconds) of the newest event of each kind. They
+    # deduplicate repeated sightings of the same log line across polls,
+    # restarts and overlapping query windows, and are persisted in state.json.
+    last_suspend_ns: int = 0
+    last_resume_ns: int = 0
+    # Wall-clock time (unix seconds) of the newest suspension event seen inside
+    # the current window; lets the window gauge age out when Loki is unreachable.
+    window_last_event_ts: int = 0
 
 
 def escape_label(value: str) -> str:
@@ -459,7 +489,6 @@ class Store:
             "loki_errors_total": 0.0,
         }
         self._lock = threading.Lock()
-        self._seen: Dict[Tuple[int, str], float] = {}
         self._suspend_re = re.compile(settings.suspend_regex)
         self._resume_re = re.compile(settings.resume_regex)
 
@@ -478,6 +507,7 @@ class Store:
         with self._lock:
             for info in self.endpoints.values():
                 info.window_suspended = False
+                info.window_last_event_ts = 0
 
     def expire_states(self) -> None:
         ttl = self.settings.state_ttl_seconds
@@ -507,9 +537,16 @@ class Store:
         return events
 
     def apply_events(self, events: Sequence[Tuple[int, str, str, str]], in_window: bool) -> int:
-        """Apply parsed events; returns the number of *new* (non-duplicate) events."""
+        """Apply parsed events; returns the number of *new* (non-duplicate) events.
+
+        Events must arrive sorted by timestamp. Duplicates are detected per
+        endpoint and kind by the newest timestamp already applied, so the
+        counter is not inflated by re-reading the same history after a restart.
+        """
         now_wall = time.time()
         now_s = int(now_wall)
+        now_ns = int(now_wall * 1_000_000_000)
+        window_ns = int(self.settings.window_seconds * 1_000_000_000)
         new_events = 0
         with self._lock:
             for ts_ns, name, address, kind in events:
@@ -519,27 +556,32 @@ class Store:
                 if address and address != info.address:
                     info.address = address
 
-                key = (ts_ns, f"{name}|{kind}")
-                is_new = key not in self._seen
-                if is_new:
-                    self._seen[key] = now_wall
-                    new_events += 1
-                    if kind == "suspend":
+                if kind == "suspend":
+                    if ts_ns > info.last_suspend_ns:
+                        info.last_suspend_ns = ts_ns
                         info.events_total += 1
-                        info.last_suspended_ts = max(info.last_suspended_ts, ts_ns // 1_000_000_000)
+                        new_events += 1
+                        info.last_suspended_ts = max(
+                            info.last_suspended_ts, ts_ns // 1_000_000_000
+                        )
                         info.suspended = True
-                    else:
-                        info.last_resumed_ts = max(info.last_resumed_ts, ts_ns // 1_000_000_000)
+                    # The window flag is refreshed by every sighting inside the
+                    # window, including duplicates re-read from Loki, but only
+                    # for events that are actually young enough to belong to it
+                    # (the query also covers the overlap before the window).
+                    if in_window and now_ns - ts_ns <= window_ns:
+                        info.window_suspended = True
+                        info.window_last_event_ts = max(
+                            info.window_last_event_ts, ts_ns // 1_000_000_000
+                        )
+                else:
+                    if ts_ns > info.last_resume_ns:
+                        info.last_resume_ns = ts_ns
+                        new_events += 1
+                        info.last_resumed_ts = max(
+                            info.last_resumed_ts, ts_ns // 1_000_000_000
+                        )
                         info.suspended = False
-
-                if kind == "suspend" and in_window:
-                    info.window_suspended = True
-
-            # Forget dedup keys that can no longer appear in a polling window.
-            seen_ttl = max(self.settings.window_seconds * 10, 3600.0)
-            stale = [key for key, ts in self._seen.items() if now_wall - ts > seen_ttl]
-            for key in stale:
-                del self._seen[key]
         return new_events
 
     # -- persistence -------------------------------------------------------
@@ -554,15 +596,41 @@ class Store:
         except (OSError, ValueError) as exc:
             LOG.warning("cannot read state file %s: %s", path, exc)
             return
+        if not isinstance(data, dict):
+            LOG.warning("ignoring state file %s: expected a JSON object", path)
+            return
+        stored = data.get("endpoints")
+        if not isinstance(stored, dict):
+            LOG.warning("ignoring state file %s: 'endpoints' is not an object", path)
+            return
         with self._lock:
-            for name, raw in (data.get("endpoints") or {}).items():
+            for name, raw in stored.items():
+                if not isinstance(raw, dict):
+                    continue
                 info = self.endpoints.setdefault(name, EndpointInfo(name))
-                info.address = raw.get("address", info.address) or info.address
-                info.first_seen_ts = int(raw.get("first_seen_ts", info.first_seen_ts))
-                info.last_suspended_ts = int(raw.get("last_suspended_ts", info.last_suspended_ts))
-                info.last_resumed_ts = int(raw.get("last_resumed_ts", info.last_resumed_ts))
-                info.events_total = int(raw.get("events_total", info.events_total))
+                address = raw.get("address")
+                if isinstance(address, str) and address:
+                    info.address = address
+                info.first_seen_ts = _int_or(raw.get("first_seen_ts"), info.first_seen_ts)
+                info.last_suspended_ts = _int_or(
+                    raw.get("last_suspended_ts"), info.last_suspended_ts
+                )
+                info.last_resumed_ts = _int_or(
+                    raw.get("last_resumed_ts"), info.last_resumed_ts
+                )
+                info.events_total = _int_or(raw.get("events_total"), info.events_total)
                 info.suspended = bool(raw.get("suspended", info.suspended))
+                # Older state files have no nanosecond fields; fall back to the
+                # stored second-resolution timestamps so a restart does not
+                # immediately recount the whole history again.
+                info.last_suspend_ns = _int_or(
+                    raw.get("last_suspend_ns"),
+                    info.last_suspended_ts * 1_000_000_000,
+                )
+                info.last_resume_ns = _int_or(
+                    raw.get("last_resume_ns"),
+                    info.last_resumed_ts * 1_000_000_000,
+                )
         LOG.info("loaded state for %d endpoint(s) from %s", len(self.endpoints), path)
 
     def save_state(self) -> None:
@@ -586,7 +654,11 @@ class Store:
                 return False
             ttl = self.settings.state_ttl_seconds
             return ttl <= 0 or now - info.last_suspended_ts <= ttl
-        return info.window_suspended
+        # window mode: age the flag out on its own, so a prolonged Loki outage
+        # cannot keep an old suspension displayed as if it were current.
+        if not info.window_suspended:
+            return False
+        return (now - info.window_last_event_ts) <= self.settings.window_seconds
 
     def render_metrics(self) -> str:
         now = int(time.time())
@@ -671,6 +743,8 @@ class Store:
                         "last_resumed_ts": info.last_resumed_ts,
                         "first_seen_ts": info.first_seen_ts,
                         "events_total": info.events_total,
+                        "last_suspend_ns": info.last_suspend_ns,
+                        "last_resume_ns": info.last_resume_ns,
                     }
                     for name, info in sorted(self.endpoints.items())
                 },
@@ -774,6 +848,16 @@ class Exporter:
         self.store = store
         self.client = client
 
+    def _warn_if_truncated(self, entries: Sequence[Tuple[int, str]], what: str) -> None:
+        if len(entries) >= self.settings.loki_limit:
+            LOG.warning(
+                "%s: Loki returned %d entries, the query limit is %d - results may be "
+                "truncated, consider raising [loki] limit",
+                what,
+                len(entries),
+                self.settings.loki_limit,
+            )
+
     def prime_history(self) -> None:
         """Fill endpoint inventory and counters from older log data at startup."""
         if self.settings.history_hours <= 0:
@@ -785,12 +869,14 @@ class Exporter:
         except LokiError as exc:
             LOG.warning("history priming skipped: %s", exc)
             return
+        self._warn_if_truncated(entries, "history priming")
         events = self.store.parse_events(entries, "suspend")
         if self.settings.mode == "state" and self.settings.loki_resume_query:
             try:
                 resume_entries = self.client.query_range(
                     self.settings.loki_resume_query, start_ns, end_ns
                 )
+                self._warn_if_truncated(resume_entries, "history priming (resume)")
                 events += self.store.parse_events(resume_entries, "resume")
             except LokiError as exc:
                 LOG.warning("history priming (resume) skipped: %s", exc)
@@ -807,7 +893,10 @@ class Exporter:
     def poll(self) -> bool:
         started = time.time()
         end_ns = int(time.time() * 1_000_000_000)
-        start_ns = end_ns - int(self.settings.window_seconds * 1_000_000_000)
+        lookback_seconds = self.settings.window_seconds + max(
+            0.0, self.settings.window_overlap_seconds
+        )
+        start_ns = end_ns - int(lookback_seconds * 1_000_000_000)
 
         try:
             entries = self.client.query_range(self.settings.loki_query, start_ns, end_ns)
@@ -837,13 +926,8 @@ class Exporter:
             events, in_window=(self.settings.mode == "window")
         )
 
-        if len(entries) >= self.settings.loki_limit:
-            LOG.warning(
-                "Loki returned %d entries, the query limit is %d - results may be "
-                "truncated, consider raising [loki] limit",
-                len(entries),
-                self.settings.loki_limit,
-            )
+        self._warn_if_truncated(entries, "poll")
+        self._warn_if_truncated(resume_entries, "poll (resume)")
 
         self.store.stats["poll_success"] = 1
         self.store.stats["last_poll_ts"] = time.time()
@@ -999,7 +1083,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--once",
         action="store_true",
-        help="run one poll (after history priming), print metrics to stdout and exit",
+        help=(
+            "run one poll (after history priming), print metrics to stdout and exit; "
+            "the state and metrics files are updated as well"
+        ),
     )
     parser.add_argument(
         "--check",
@@ -1009,7 +1096,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--log-level",
         default=None,
-        help="override [exporter] log_level (DEBUG, INFO, WARNING, ERROR)",
+        help="override [exporter] log_level (" + ", ".join(LOG_LEVELS) + ")",
     )
     args = parser.parse_args(argv)
 
@@ -1020,7 +1107,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     level_name = (args.log_level or settings.log_level).upper()
-    level = getattr(logging, level_name, logging.INFO)
+    if level_name not in LOG_LEVELS:
+        print(
+            "configuration error: log level must be one of " + ", ".join(LOG_LEVELS),
+            file=sys.stderr,
+        )
+        return 2
+    level = getattr(logging, level_name)
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1031,7 +1124,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"configuration OK: {args.config}")
         print(f"  loki url   : {settings.loki_url}")
         print(f"  loki query : {settings.loki_query}")
-        print(f"  mode       : {settings.mode} (window={settings.window_seconds:g}s)")
+        print(
+            f"  mode       : {settings.mode} (window={settings.window_seconds:g}s, "
+            f"overlap={settings.window_overlap_seconds:g}s)"
+        )
         print(f"  listen     : {settings.listen_host}:{settings.listen_port}")
         print(f"  known eps  : {len(settings.known_endpoints)}")
         return 0
