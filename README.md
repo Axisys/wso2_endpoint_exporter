@@ -55,8 +55,8 @@ the dashboard (see `grafana/wso2-endpoint-status-dashboard.json`).
 The exporter reads only these log lines from Loki:
 
 ```
-[2026-10-27 14:31:41,579]  WARN {...EndpointContext} - Endpoint : UPC_CFT_EP
-with address http://localhost:8280/services/UPC_Gateway_DataService
+[2026-10-27 14:31:41,579]  WARN {...EndpointContext} - Endpoint : UPC_STG_EP
+with address http://localhost:8280/services/STG_Gateway_DataService
 will be marked SUSPENDED as it failed
 ```
 
@@ -78,8 +78,8 @@ APIM log lines are formatted slightly differently (they start with
 the address optional:
 
 ```
-warn TID: [-1234] [] [2026-10-28 12:47:05,986]  WARN {...EndpointContext} - Endpoint : ISMG_W4_API--vv1_APIsandboxEndpoint with address https://monty.zenit.ru:8243/ismg/w4 will be marked SUSPENDED as it failed
-TID: [-1234] [] [2026-10-28 17:16:58,696]  WARN {...EndpointContext} - Endpoint : RCP_BPA--vv2_APIproductionEndpoint  will be marked SUSPENDED as it failed
+warn TID: [-1234] [] [2026-10-28 12:47:05,986]  WARN {...EndpointContext} - Endpoint : ISMG_WG_API--vv1_APIsandboxEndpoint with address https://super.monty.com:8243/ismg/w4 will be marked SUSPENDED as it failed
+TID: [-1234] [] [2026-10-28 17:16:58,696]  WARN {...EndpointContext} - Endpoint : STG_RPA--vv2_APIproductionEndpoint  will be marked SUSPENDED as it failed
 ```
 
 Each query is polled independently: if one Loki query fails, the data from the
