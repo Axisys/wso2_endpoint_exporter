@@ -34,6 +34,22 @@ RESUME_LINE = (
     "will be marked ACTIVE as it has been suspended for 60000 ms"
 )
 
+# WSO2 APIM writes a "warn TID: ..." prefix in front of the same message.
+APIM_LINE = (
+    "warn TID: [-1234] [] [2026-10-28 12:47:05,986]  WARN "
+    "{org.apache.synapse.endpoints.EndpointContext} - "
+    "Endpoint : ISMG_W4_API--vv1_APIsandboxEndpoint with address "
+    "https://monty.zenit.ru:8243/ismg/w4 will be marked SUSPENDED as it failed "
+)
+
+# Some APIM lines omit "with address"; note the double space before "will".
+NO_ADDRESS_LINE = (
+    "TID: [-1234] [] [2026-10-28 17:16:58,696]  WARN "
+    "{org.apache.synapse.endpoints.EndpointContext} - "
+    "Endpoint : RCP_BPA--vv2_APIproductionEndpoint  "
+    "will be marked SUSPENDED as it failed"
+)
+
 
 def now_ns():
     return int(time.time() * 1_000_000_000)
@@ -44,6 +60,7 @@ class FakeLokiHandler(BaseHTTPRequestHandler):
 
     entries = []          # [(ts_ns, line)]
     resume_entries = []   # [(ts_ns, line)]
+    apim_entries = []     # [(ts_ns, line)] for queries mentioning apimlogs
     fail_next = 0         # respond 500 that many times
 
     def log_message(self, *args):
@@ -63,7 +80,12 @@ class FakeLokiHandler(BaseHTTPRequestHandler):
         query = params.get("query", [""])[0]
         start = int(params.get("start", ["0"])[0])
         end = int(params.get("end", ["0"])[0])
-        source = FakeLokiHandler.resume_entries if "ACTIVE" in query else FakeLokiHandler.entries
+        if "ACTIVE" in query:
+            source = FakeLokiHandler.resume_entries
+        elif "apimlogs" in query:
+            source = FakeLokiHandler.apim_entries
+        else:
+            source = FakeLokiHandler.entries
         values = [[str(ts), line] for ts, line in source if start <= ts <= end]
         body = json.dumps(
             {
@@ -151,6 +173,42 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0][1], "UPC_CFT_EP")
         self.assertEqual(events[0][3], "resume")
+
+    def test_apim_line_is_parsed(self):
+        store = ee.Store(make_settings())
+        events = store.parse_events([(now_ns(), APIM_LINE)], "suspend")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1], "ISMG_W4_API--vv1_APIsandboxEndpoint")
+        self.assertEqual(events[0][2], "https://monty.zenit.ru:8243/ismg/w4")
+
+    def test_line_without_address_is_parsed(self):
+        store = ee.Store(make_settings())
+        events = store.parse_events([(now_ns(), NO_ADDRESS_LINE)], "suspend")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1], "RCP_BPA--vv2_APIproductionEndpoint")
+        self.assertEqual(events[0][2], "")
+
+    def test_endpoint_name_with_spaces_is_parsed(self):
+        line = (
+            "[2026-10-27 14:31:41,579]  WARN {x} - Endpoint : My Endpoint Name "
+            "with address http://example.org/svc will be marked SUSPENDED as it failed"
+        )
+        store = ee.Store(make_settings())
+        events = store.parse_events([(now_ns(), line)], "suspend")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1], "My Endpoint Name")
+        self.assertEqual(events[0][2], "http://example.org/svc")
+
+    def test_resume_line_without_address_is_parsed(self):
+        line = (
+            "[2026-10-27 14:35:00,000]  INFO {x} - Endpoint : RCP_BPA--vv2_APIproductionEndpoint "
+            "will be marked ACTIVE as it has been suspended for 60000 ms"
+        )
+        store = ee.Store(make_settings(mode="state"))
+        events = store.parse_events([(now_ns(), line)], "resume")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1], "RCP_BPA--vv2_APIproductionEndpoint")
+        self.assertEqual(events[0][2], "")
 
     def test_missing_named_group_is_rejected(self):
         with self.assertRaises(ee.ConfigError):
@@ -338,6 +396,7 @@ class EndToEndTests(unittest.TestCase):
     def setUp(self):
         FakeLokiHandler.entries = []
         FakeLokiHandler.resume_entries = []
+        FakeLokiHandler.apim_entries = []
         FakeLokiHandler.fail_next = 0
         self.loki = FakeLoki()
         self.tmp = tempfile.TemporaryDirectory()
@@ -388,6 +447,40 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn("wso2_exporter_loki_errors_total 1", metrics)
         # previous window data is still served
         self.assertIn('endpoint="UPC_CFT_EP",address="http://localhost:8280/services/UPC_Gateway_DataService"} 1', metrics)
+
+    def test_multiple_queries_are_merged(self):
+        FakeLokiHandler.entries = [(now_ns() - 3_000_000_000, SAMPLE_LINES[0])]
+        FakeLokiHandler.apim_entries = [(now_ns() - 2_000_000_000, APIM_LINE)]
+        settings = self._settings(
+            loki_queries=[
+                '{job="wso2logs-os",level="WARN"} |= "will be marked SUSPENDED"',
+                '{job="apimlogs"} |= "will be marked SUSPENDED"',
+            ],
+        )
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        self.assertTrue(exporter.poll())
+        metrics = store.render_metrics()
+        self.assertIn('endpoint="UPC_CFT_EP"', metrics)
+        self.assertIn('endpoint="ISMG_W4_API--vv1_APIsandboxEndpoint"', metrics)
+        self.assertIn("wso2_exporter_poll_success 1", metrics)
+
+    def test_partial_query_failure_keeps_working_source(self):
+        FakeLokiHandler.apim_entries = [(now_ns() - 2_000_000_000, APIM_LINE)]
+        FakeLokiHandler.fail_next = 1  # the MI query fails, the APIM query succeeds
+        settings = self._settings(
+            loki_queries=[
+                '{job="wso2logs-os",level="WARN"} |= "x"',
+                '{job="apimlogs"} |= "x"',
+            ],
+        )
+        store = ee.Store(settings)
+        exporter = ee.Exporter(settings, store, ee.LokiClient(settings))
+        self.assertFalse(exporter.poll())
+        metrics = store.render_metrics()
+        self.assertIn('endpoint="ISMG_W4_API--vv1_APIsandboxEndpoint"', metrics)
+        self.assertIn("wso2_exporter_poll_success 0", metrics)
+        self.assertIn("wso2_exporter_loki_errors_total 1", metrics)
 
     def test_state_mode_poll_handles_resume(self):
         FakeLokiHandler.entries = [(now_ns(), SAMPLE_LINES[0])]
@@ -506,6 +599,41 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "config.ini"
             path.write_text("[exporter]\nlog_level = verbose\n", encoding="utf-8")
+            with self.assertRaises(ee.ConfigError):
+                ee.load_config(str(path))
+
+    def test_extra_queries_are_loaded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "config.ini"
+            path.write_text(
+                "[loki]\n"
+                'query = {job="a"} |= "x"\n'
+                "extra_queries =\n"
+                '    {job="b"} |= "y"\n'
+                '    {job="c"} |= "z"\n'
+                "extra_resume_queries =\n"
+                '    {job="b"} |~ "ACTIVE"\n',
+                encoding="utf-8",
+            )
+            settings = ee.load_config(str(path))
+            self.assertEqual(
+                settings.suspend_queries(),
+                ['{job="a"} |= "x"', '{job="b"} |= "y"', '{job="c"} |= "z"'],
+            )
+            self.assertEqual(
+                settings.resume_queries(),
+                ["", '{job="b"} |~ "ACTIVE"', ""],
+            )
+
+    def test_too_many_extra_resume_queries_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "config.ini"
+            path.write_text(
+                '[loki]\nquery = {job="a"} |= "x"\n'
+                "extra_resume_queries =\n"
+                '    {job="a"} |~ "ACTIVE"\n',
+                encoding="utf-8",
+            )
             with self.assertRaises(ee.ConfigError):
                 ee.load_config(str(path))
 

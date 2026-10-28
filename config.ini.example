@@ -12,10 +12,21 @@ url = https://mobius.ganymede.com:3100
 # Must return raw log streams (no aggregation operators such as sum/count).
 query = {job="wso2logs-os",level="WARN"} |= "will be marked SUSPENDED as it failed"
 
+# Additional queries for other Loki jobs (for example WSO2 APIM). One query per
+# line, indented with spaces. All queries are polled and merged into the same
+# endpoint table. Endpoint names should be unique across the queries.
+#extra_queries =
+#    {job="apimlogs"} |= "will be marked SUSPENDED as it failed"
+
 # Optional second query for the "endpoint is ACTIVE again" lines. Used only in
 # mode = state. Leave empty if your Loki has no such messages; in that case the
 # state expires after state_ttl_seconds instead.
 #resume_query = {job="wso2logs-os"} |~ "(?i)marked ACTIVE|suspension period has ended"
+
+# Optional resume query for each entry of extra_queries, in the same order
+# (mode = state only). Missing lines mean "no resume query" for that source.
+#extra_resume_queries =
+#    {job="apimlogs"} |~ "(?i)marked ACTIVE"
 
 # Maximum number of log entries returned per request.
 limit = 5000
@@ -41,9 +52,10 @@ verify_tls = false
 [parse]
 # Regular expressions that extract endpoint data from a log line.
 # Each regex MUST contain the named group (?P<endpoint>...) and may contain
-# (?P<address>...).
-suspend_regex = Endpoint\s*:\s*(?P<endpoint>\S+)\s+with\s+address\s+(?P<address>\S+)\s+will\s+be\s+marked\s+SUSPENDED
-resume_regex = Endpoint\s*:\s*(?P<endpoint>\S+)\s+with\s+address\s+(?P<address>\S+)\s+[^\n]*?\bACTIVE\b
+# (?P<address>...). The "with address ..." part is optional, because some APIM
+# log lines omit it; the address label is then empty.
+suspend_regex = Endpoint\s*:\s*(?P<endpoint>.+?)(?:\s+with\s+address\s+(?P<address>\S+))?\s+will\s+be\s+marked\s+SUSPENDED
+resume_regex = Endpoint\s*:\s*(?P<endpoint>.+?)(?:\s+with\s+address\s+(?P<address>\S+))?\s+[^\n]*?\bACTIVE\b
 
 [exporter]
 # Where the built-in HTTP server listens. Keep 127.0.0.1 if Prometheus runs on

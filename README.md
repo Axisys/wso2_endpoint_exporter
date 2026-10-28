@@ -60,6 +60,33 @@ with address http://localhost:8280/services/UPC_Gateway_DataService
 will be marked SUSPENDED as it failed
 ```
 
+### Several Loki jobs (MI + APIM)
+
+The exporter can poll more than one LogQL query and merge the results into the
+same endpoint table. The primary query stays in `query`; additional sources go
+into `extra_queries`, one per line (indented with spaces):
+
+```ini
+[loki]
+query = {job="wso2logs-os",level="WARN"} |= "will be marked SUSPENDED as it failed"
+extra_queries =
+    {job="apimlogs"} |= "will be marked SUSPENDED as it failed"
+```
+
+APIM log lines are formatted slightly differently (they start with
+`warn TID: ...`) and sometimes have no `with address` part, so the parser makes
+the address optional:
+
+```
+warn TID: [-1234] [] [2026-10-28 12:47:05,986]  WARN {...EndpointContext} - Endpoint : ISMG_W4_API--vv1_APIsandboxEndpoint with address https://monty.zenit.ru:8243/ismg/w4 will be marked SUSPENDED as it failed
+TID: [-1234] [] [2026-10-28 17:16:58,696]  WARN {...EndpointContext} - Endpoint : RCP_BPA--vv2_APIproductionEndpoint  will be marked SUSPENDED as it failed
+```
+
+Each query is polled independently: if one Loki query fails, the data from the
+others is still exported, but `wso2_exporter_poll_success` becomes `0` so the
+staleness alerts fire. The endpoint table is keyed by endpoint name, so names
+should be unique across the queries; the newest observed address wins.
+
 The main gauge has two working modes (`[exporter] mode`):
 
 | mode | value 1 | value 0 |
@@ -152,8 +179,8 @@ Only section summary here:
 
 | Section | Key settings |
 |---------|--------------|
-| `[loki]` | `url`, `query` (LogQL for suspensions), `resume_query`, `limit`, `timeout_seconds`, `verify_tls`, `ca_bundle`, `username`/`password`, `bearer_token`, `extra_headers` (e.g. `X-Scope-OrgID`) |
-| `[parse]` | `suspend_regex`, `resume_regex` - must contain named group `(?P<endpoint>...)`, optionally `(?P<address>...)` |
+| `[loki]` | `url`, `query` (LogQL for suspensions), `extra_queries` (more jobs, one per line), `resume_query`, `extra_resume_queries`, `limit`, `timeout_seconds`, `verify_tls`, `ca_bundle`, `username`/`password`, `bearer_token`, `extra_headers` (e.g. `X-Scope-OrgID`) |
+| `[parse]` | `suspend_regex`, `resume_regex` - must contain named group `(?P<endpoint>...)`; `(?P<address>...)` is optional and may be missing in the log line |
 | `[exporter]` | `listen_host`/`listen_port`, `poll_interval_seconds`, `mode`, `window_seconds`, `window_overlap_seconds`, `state_ttl_seconds`, `history_hours`, `state_file`, `metrics_file`, `known_endpoints`, metric names, `log_level` |
 
 `state_file` and `metrics_file` must point to a writable directory when the
@@ -266,4 +293,3 @@ Manual check from the Prometheus host:
 curl -s http://127.0.0.1:9187/health
 curl -s http://127.0.0.1:9187/metrics | head
 ```
-"# wso2_endpoint_exporter" 

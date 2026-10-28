@@ -13,6 +13,10 @@ status table for Grafana.
 The program uses only the Python standard library (Python >= 3.9; target
 platform is Debian 12 with a clean Python 3.11, no pip packages allowed).
 
+More than one Loki job can be polled: [loki] query is the primary source and
+[loki] extra_queries lists additional LogQL queries (for example WSO2 APIM);
+their results are merged into one endpoint table.
+
 HTTP endpoints of the built-in server (bound to 127.0.0.1 by default):
 
     /metrics     Prometheus text exposition format (scraped by Prometheus)
@@ -45,7 +49,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Sequence, Tuple
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 LOG = logging.getLogger("wso2-endpoint-exporter")
 
@@ -58,15 +62,18 @@ LOG = logging.getLogger("wso2-endpoint-exporter")
 # ---------------------------------------------------------------------------
 
 DEFAULT_SUSPEND_REGEX = (
-    r"Endpoint\s*:\s*(?P<endpoint>\S+)\s+with\s+address\s+(?P<address>\S+)\s+"
-    r"will\s+be\s+marked\s+SUSPENDED"
+    r"Endpoint\s*:\s*(?P<endpoint>.+?)"
+    r"(?:\s+with\s+address\s+(?P<address>\S+))?"
+    r"\s+will\s+be\s+marked\s+SUSPENDED"
 )
 
 # The exact "back to ACTIVE" wording differs between Synapse versions, so the
 # default rule is intentionally loose: an endpoint line that mentions ACTIVE.
+# "with address" is optional here as well (some APIM lines omit it).
 DEFAULT_RESUME_REGEX = (
-    r"Endpoint\s*:\s*(?P<endpoint>\S+)\s+with\s+address\s+(?P<address>\S+)\s+"
-    r"[^\n]*?\bACTIVE\b"
+    r"Endpoint\s*:\s*(?P<endpoint>.+?)"
+    r"(?:\s+with\s+address\s+(?P<address>\S+))?"
+    r"\s+[^\n]*?\bACTIVE\b"
 )
 
 METRIC_NAME_RE = re.compile(r"[a-zA-Z_:][a-zA-Z0-9_:]*\Z")
@@ -104,6 +111,12 @@ class Settings:
         '|= "will be marked SUSPENDED as it failed"'
     )
     loki_resume_query: str = ""  # only used in mode = state
+    # Additional sources: one LogQL query per list entry. They are polled in
+    # the same way as the primary query and merged into one endpoint table
+    # (used e.g. for WSO2 APIM logs in a second Loki job).
+    loki_queries: List[str] = dataclasses.field(default_factory=list)
+    # Optional resume query for every entry of loki_queries, same order.
+    loki_resume_queries: List[str] = dataclasses.field(default_factory=list)
     loki_limit: int = 5000
     loki_timeout_seconds: float = 30.0
     loki_verify_tls: bool = False
@@ -137,6 +150,34 @@ class Settings:
     )
     metric_events_total: str = "wso2_endpoint_suspension_events_total"
     log_level: str = "INFO"
+
+    def suspend_queries(self) -> List[str]:
+        """All suspension queries: the primary one plus extra_queries."""
+        queries = [query.strip() for query in self.loki_queries if query.strip()]
+        return queries or [self.loki_query]
+
+    def resume_queries(self) -> List[str]:
+        """Resume query per suspension query (empty string = no resume query)."""
+        suspend = self.suspend_queries()
+        if self.loki_resume_queries:
+            resume = [query.strip() for query in self.loki_resume_queries]
+        elif self.loki_resume_query:
+            resume = [self.loki_resume_query.strip()]
+        else:
+            resume = []
+        if len(resume) < len(suspend):
+            resume.extend([""] * (len(suspend) - len(resume)))
+        return resume[: len(suspend)]
+
+
+def _split_queries(raw: str) -> List[str]:
+    """Split a multiline INI value into one LogQL query per non-empty line."""
+    queries: List[str] = []
+    for line in raw.replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            queries.append(line)
+    return queries
 
 
 def _parse_bool(raw: str, key: str) -> bool:
@@ -239,6 +280,12 @@ def load_config(path: str) -> Settings:
     settings.loki_resume_query = get(
         "loki", "resume_query", settings.loki_resume_query
     ).strip()
+    extra_queries = _split_queries(get("loki", "extra_queries", ""))
+    extra_resume_queries = _split_queries(get("loki", "extra_resume_queries", ""))
+    settings.loki_queries = [settings.loki_query] + extra_queries
+    # Empty string means "no resume query" for that source; the list is padded
+    # to the number of suspension queries.
+    settings.loki_resume_queries = [settings.loki_resume_query] + extra_resume_queries
     settings.loki_limit = get_int("loki", "limit", settings.loki_limit)
     settings.loki_timeout_seconds = get_float(
         "loki", "timeout_seconds", settings.loki_timeout_seconds
@@ -308,6 +355,12 @@ def load_config(path: str) -> Settings:
         raise ConfigError("[loki] url must start with http:// or https://")
     if not settings.loki_query:
         raise ConfigError("[loki] query must not be empty")
+    if any(not query.strip() for query in settings.loki_queries):
+        raise ConfigError("[loki] extra_queries must not contain empty lines")
+    if len(settings.loki_resume_queries) > len(settings.loki_queries):
+        raise ConfigError(
+            "[loki] extra_resume_queries cannot have more entries than extra_queries"
+        )
     if settings.loki_limit <= 0:
         raise ConfigError("[loki] limit must be positive")
     if settings.loki_timeout_seconds <= 0:
@@ -326,10 +379,12 @@ def load_config(path: str) -> Settings:
         raise ConfigError(
             "[exporter] log_level must be one of " + ", ".join(LOG_LEVELS)
         )
-    if settings.mode == "state" and not settings.loki_resume_query:
+    if settings.mode == "state" and not any(
+        query.strip() for query in settings.resume_queries()
+    ):
         LOG.warning(
-            "mode=state but [loki] resume_query is empty: endpoints will only leave "
-            "the SUSPENDED state through state_ttl_seconds (%ss)",
+            "mode=state but no resume query is configured: endpoints will only "
+            "leave the SUSPENDED state through state_ttl_seconds (%ss)",
             settings.state_ttl_seconds,
         )
     for key, name in (
@@ -866,6 +921,13 @@ class Exporter:
         self.settings = settings
         self.store = store
         self.client = client
+        self.suspend_queries = settings.suspend_queries()
+        self.resume_queries = settings.resume_queries()
+
+    @staticmethod
+    def _short_query(query: str, limit: int = 70) -> str:
+        query = " ".join(query.split())
+        return query if len(query) <= limit else query[: limit - 3] + "..."
 
     def _warn_if_truncated(self, entries: Sequence[Tuple[int, str]], what: str) -> None:
         if len(entries) >= self.settings.loki_limit:
@@ -883,33 +945,56 @@ class Exporter:
             return
         end_ns = int(time.time() * 1_000_000_000)
         start_ns = end_ns - int(self.settings.history_hours * 3600 * 1_000_000_000)
-        try:
-            entries = self.client.query_range(self.settings.loki_query, start_ns, end_ns)
-        except LokiError as exc:
-            LOG.warning("history priming skipped: %s", exc)
-            return
-        self._warn_if_truncated(entries, "history priming")
-        events = self.store.parse_events(entries, "suspend")
-        if self.settings.mode == "state" and self.settings.loki_resume_query:
+        events: List[Tuple[int, str, str, str]] = []
+        total_entries = 0
+        for index, query in enumerate(self.suspend_queries, 1):
             try:
-                resume_entries = self.client.query_range(
-                    self.settings.loki_resume_query, start_ns, end_ns
-                )
-                self._warn_if_truncated(resume_entries, "history priming (resume)")
-                events += self.store.parse_events(resume_entries, "resume")
+                entries = self.client.query_range(query, start_ns, end_ns)
             except LokiError as exc:
-                LOG.warning("history priming (resume) skipped: %s", exc)
+                LOG.warning(
+                    "history priming skipped for query %d (%s): %s",
+                    index,
+                    self._short_query(query),
+                    exc,
+                )
+                continue
+            total_entries += len(entries)
+            self._warn_if_truncated(entries, f"history priming (query {index})")
+            events += self.store.parse_events(entries, "suspend")
+            if self.settings.mode != "state":
+                continue
+            resume_query = self.resume_queries[index - 1]
+            if not resume_query:
+                continue
+            try:
+                resume_entries = self.client.query_range(resume_query, start_ns, end_ns)
+            except LokiError as exc:
+                LOG.warning("history priming (resume query %d) skipped: %s", index, exc)
+                continue
+            total_entries += len(resume_entries)
+            self._warn_if_truncated(
+                resume_entries, f"history priming (resume query {index})"
+            )
+            events += self.store.parse_events(resume_entries, "resume")
         # History must not influence the current window status.
         events.sort(key=lambda event: event[0])
         new_events = self.store.apply_events(events, in_window=False)
         LOG.info(
-            "history priming: %d log line(s), %d endpoint event(s) over %.1f h",
-            len(entries),
+            "history priming: %d log line(s) from %d query(ies), %d endpoint "
+            "event(s) over %.1f h",
+            total_entries,
+            len(self.suspend_queries),
             new_events,
             self.settings.history_hours,
         )
 
     def poll(self) -> bool:
+        """Poll every configured query.
+
+        Returns True only when every configured Loki query succeeded. Partial
+        results are still applied and exported, but poll_success becomes 0 so
+        that the staleness alerts fire.
+        """
         started = time.time()
         end_ns = int(time.time() * 1_000_000_000)
         lookback_seconds = self.settings.window_seconds + max(
@@ -917,19 +1002,56 @@ class Exporter:
         )
         start_ns = end_ns - int(lookback_seconds * 1_000_000_000)
 
-        try:
-            entries = self.client.query_range(self.settings.loki_query, start_ns, end_ns)
-            resume_entries: List[Tuple[int, str]] = []
-            if self.settings.mode == "state" and self.settings.loki_resume_query:
-                resume_entries = self.client.query_range(
-                    self.settings.loki_resume_query, start_ns, end_ns
+        events: List[Tuple[int, str, str, str]] = []
+        total_entries = 0
+        succeeded = 0
+        errors = 0
+        for index, query in enumerate(self.suspend_queries, 1):
+            try:
+                entries = self.client.query_range(query, start_ns, end_ns)
+            except LokiError as exc:
+                errors += 1
+                LOG.error(
+                    "Loki poll failed for query %d (%s): %s",
+                    index,
+                    self._short_query(query),
+                    exc,
                 )
-        except LokiError as exc:
+                continue
+            succeeded += 1
+            total_entries += len(entries)
+            self._warn_if_truncated(entries, f"poll (query {index})")
+            events += self.store.parse_events(entries, "suspend")
+
+            if self.settings.mode != "state":
+                continue
+            resume_query = self.resume_queries[index - 1]
+            if not resume_query:
+                continue
+            try:
+                resume_entries = self.client.query_range(resume_query, start_ns, end_ns)
+            except LokiError as exc:
+                errors += 1
+                LOG.error(
+                    "Loki poll failed for resume query %d (%s): %s",
+                    index,
+                    self._short_query(resume_query),
+                    exc,
+                )
+                continue
+            total_entries += len(resume_entries)
+            self._warn_if_truncated(resume_entries, f"poll (resume query {index})")
+            events += self.store.parse_events(resume_entries, "resume")
+
+        if succeeded == 0:
             self.store.stats["loki_errors_total"] += 1
             self.store.stats["poll_success"] = 0
             self.store.stats["last_poll_ts"] = time.time()
             self.store.stats["last_poll_duration_seconds"] = time.time() - started
-            LOG.error("Loki poll failed: %s", exc)
+            LOG.error(
+                "All %d Loki suspension query(ies) failed",
+                len(self.suspend_queries),
+            )
             return False
 
         if self.settings.mode == "window":
@@ -937,31 +1059,43 @@ class Exporter:
         else:
             self.store.expire_states()
 
-        events = self.store.parse_events(entries, "suspend")
-        if resume_entries:
-            events += self.store.parse_events(resume_entries, "resume")
         events.sort(key=lambda event: event[0])
         new_events = self.store.apply_events(
             events, in_window=(self.settings.mode == "window")
         )
 
-        self._warn_if_truncated(entries, "poll")
-        self._warn_if_truncated(resume_entries, "poll (resume)")
+        now = time.time()
+        if errors:
+            self.store.stats["loki_errors_total"] += 1
+        self.store.stats["poll_success"] = 0 if errors else 1
+        self.store.stats["last_poll_ts"] = now
+        if not errors:
+            self.store.stats["last_success_ts"] = now
+        self.store.stats["last_poll_duration_seconds"] = now - started
 
-        self.store.stats["poll_success"] = 1
-        self.store.stats["last_poll_ts"] = time.time()
-        self.store.stats["last_success_ts"] = time.time()
-        self.store.stats["last_poll_duration_seconds"] = time.time() - started
         self.store.save_state()
         self.store.write_metrics_file()
-        LOG.info(
-            "poll ok: %d log line(s), %d matched event(s) (%d new), %d endpoint(s) tracked",
-            len(entries),
-            len(events),
-            new_events,
-            len(self.store.endpoints),
-        )
-        return True
+        if errors:
+            LOG.warning(
+                "poll partially failed: %d failed request(s), %d log line(s), "
+                "%d matched event(s) (%d new), %d endpoint(s) tracked",
+                errors,
+                total_entries,
+                len(events),
+                new_events,
+                len(self.store.endpoints),
+            )
+        else:
+            LOG.info(
+                "poll ok: %d log line(s) from %d query(ies), %d matched event(s) "
+                "(%d new), %d endpoint(s) tracked",
+                total_entries,
+                len(self.suspend_queries),
+                len(events),
+                new_events,
+                len(self.store.endpoints),
+            )
+        return errors == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1142,7 +1276,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.check:
         print(f"configuration OK: {args.config}")
         print(f"  loki url   : {settings.loki_url}")
-        print(f"  loki query : {settings.loki_query}")
+        queries = settings.suspend_queries()
+        resume_queries = [
+            query for query in settings.resume_queries() if query.strip()
+        ]
+        print(f"  loki query : {queries[0]}")
+        for index, query in enumerate(queries[1:], 2):
+            print(f"  query {index}    : {query}")
+        if resume_queries:
+            print(f"  resume q.  : {resume_queries[0]}")
+            for index, query in enumerate(resume_queries[1:], 2):
+                print(f"  resume {index}   : {query}")
         print(
             f"  mode       : {settings.mode} (window={settings.window_seconds:g}s, "
             f"overlap={settings.window_overlap_seconds:g}s)"
