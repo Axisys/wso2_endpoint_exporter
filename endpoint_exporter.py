@@ -45,7 +45,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Sequence, Tuple
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 LOG = logging.getLogger("wso2-endpoint-exporter")
 
@@ -827,7 +827,26 @@ class Store:
         return (time.time() - last_success) <= max_age
 
 
+def _output_path_problem(path: str) -> Optional[str]:
+    """Explain why the state/metrics path cannot be written, or return None."""
+    if not path:
+        return None  # persistence disabled on purpose
+    directory = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(directory):
+        return (
+            f"directory {directory} does not exist - create it or fix the path "
+            "in the configuration file"
+        )
+    if not os.access(directory, os.W_OK | os.X_OK):
+        return f"directory {directory} is not writable by this user"
+    return None
+
+
 def _atomic_write(path: str, data: str) -> None:
+    problem = _output_path_problem(path)
+    if problem:
+        LOG.error("cannot write %s: %s", path, problem)
+        return
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
@@ -1130,7 +1149,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(f"  listen     : {settings.listen_host}:{settings.listen_port}")
         print(f"  known eps  : {len(settings.known_endpoints)}")
+        for key in ("state_file", "metrics_file"):
+            path = getattr(settings, key)
+            problem = _output_path_problem(path)
+            if not path:
+                print(f"  {key:<10} : disabled")
+            elif problem:
+                print(f"  {key:<10} : WARNING: {problem} ({path})")
+            else:
+                print(f"  {key:<10} : OK ({path})")
         return 0
+
+    for key in ("state_file", "metrics_file"):
+        path = getattr(settings, key)
+        problem = _output_path_problem(path)
+        if problem:
+            LOG.warning("[exporter] %s: %s", key, problem)
 
     store = Store(settings)
     store.ensure_known_endpoints()

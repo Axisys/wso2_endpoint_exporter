@@ -518,5 +518,28 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(store.endpoints, {})
 
 
+class OutputPathTests(unittest.TestCase):
+    def test_missing_directory_is_reported_and_not_created(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "missing-dir" / "state.json"
+            problem = ee._output_path_problem(str(target))
+            self.assertIsNotNone(problem)
+            self.assertIn("does not exist", problem)
+            ee._atomic_write(str(target), "{}")
+            self.assertFalse(target.parent.exists())
+            self.assertFalse(target.exists())
+
+    def test_existing_directory_is_writable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "state.json"
+            self.assertIsNone(ee._output_path_problem(str(target)))
+            ee._atomic_write(str(target), "{}")
+            self.assertEqual(target.read_text(encoding="utf-8"), "{}")
+            self.assertFalse((pathlib.Path(tmp) / "state.json.tmp").exists())
+
+    def test_empty_path_is_disabled(self):
+        self.assertIsNone(ee._output_path_problem(""))
+
+
 if __name__ == "__main__":
     unittest.main()

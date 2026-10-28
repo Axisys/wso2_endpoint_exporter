@@ -159,6 +159,8 @@ Only section summary here:
 `state_file` and `metrics_file` must point to a writable directory when the
 service runs under the shipped systemd unit: `ProtectSystem=strict` leaves only
 `/var/lib/wso2-endpoint-exporter` writable (`StateDirectory=` in the unit).
+`--check` prints both resolved paths and warns when the parent directory is
+missing or not writable.
 
 The default LogQL is the one you already use in Grafana Explore:
 
@@ -254,6 +256,7 @@ round-trip, HTTP endpoints and failure handling.
 | gauge stuck at 1 in `state` mode | no recovery lines matched - configure `resume_query` or rely on `state_ttl_seconds` |
 | `unsupported Loki resultType` in the log | the LogQL query aggregates (e.g. `count_over_time`); use a raw stream query |
 | truncation warning in the log | raise `[loki] limit` |
+| `cannot write ...: directory ... does not exist` | typo in `state_file`/`metrics_file` - `--check` prints the resolved paths and warns about a missing directory |
 | `cannot write state.json: Read-only file system` | make `state_file`/`metrics_file` absolute paths under `/var/lib/wso2-endpoint-exporter` (or set `StateDirectory=`/`ReadWritePaths=` in the unit) |
 | Prometheus target down | exporter bound to `127.0.0.1` while Prometheus is remote - change `listen_host` |
 
