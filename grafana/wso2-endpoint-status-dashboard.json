@@ -12,7 +12,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Status of WSO2 Micro Integrator endpoints derived from Loki suspension log lines by wso2-endpoint-exporter. Metric names: wso2_endpoint_suspended, wso2_endpoint_last_suspended_timestamp_seconds, wso2_endpoint_suspension_events_total.",
+  "description": "Status of WSO2 Micro Integrator endpoints derived from Loki suspension log lines by wso2-endpoint-exporter. Metrics: wso2_endpoint_suspended, wso2_endpoint_last_suspended_timestamp_seconds, wso2_endpoint_suspension_events_total.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -21,11 +21,20 @@
   "liveNow": false,
   "panels": [
     {
+      "id": 1,
+      "type": "stat",
+      "title": "Endpoints SUSPENDED now",
+      "description": "Number of endpoints currently treated as SUSPENDED by the exporter (mode=window, see exporter docs).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Number of endpoints currently treated as SUSPENDED.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -48,13 +57,6 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 0,
-        "y": 0
-      },
-      "id": 1,
       "options": {
         "colorMode": "background",
         "graphMode": "none",
@@ -67,28 +69,35 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto",
+        "textMode": "value",
         "wideLayout": true
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "count(wso2_endpoint_suspended == 1) or vector(0)",
+          "expr": "count(wso2_endpoint_suspended{endpoint=~\"$endpoint\"} == 1) or vector(0)",
           "instant": true,
-          "legendFormat": "suspended",
+          "range": false,
+          "legendFormat": "__auto",
           "refId": "A"
         }
-      ],
-      "title": "Endpoints SUSPENDED now",
-      "type": "stat"
+      ]
     },
     {
+      "id": 2,
+      "type": "stat",
+      "title": "Tracked endpoints",
+      "description": "Endpoints known to the exporter: configured list plus everything discovered from Loki and remembered in state.json.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Endpoints currently tracked by the exporter (known list + discovered from Loki).",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -107,13 +116,6 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 6,
-        "y": 0
-      },
-      "id": 2,
       "options": {
         "colorMode": "value",
         "graphMode": "none",
@@ -126,28 +128,35 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto",
+        "textMode": "value",
         "wideLayout": true
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
           "expr": "wso2_exporter_known_endpoints",
           "instant": true,
-          "legendFormat": "endpoints",
+          "range": false,
+          "legendFormat": "__auto",
           "refId": "A"
         }
-      ],
-      "title": "Tracked endpoints",
-      "type": "stat"
+      ]
     },
     {
+      "id": 3,
+      "type": "stat",
+      "title": "Exporter poll OK",
+      "description": "1 when the last Loki poll succeeded, 0 when it failed. Red means Prometheus is scraping stale exporter state.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "1 when the last Loki poll succeeded.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -155,17 +164,19 @@
           },
           "mappings": [
             {
+              "type": "value",
               "options": {
                 "0": {
                   "color": "red",
-                  "text": "FAILED"
+                  "text": "FAILED",
+                  "index": 0
                 },
                 "1": {
                   "color": "green",
-                  "text": "OK"
+                  "text": "OK",
+                  "index": 1
                 }
-              },
-              "type": "value"
+              }
             }
           ],
           "thresholds": {
@@ -184,13 +195,6 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 12,
-        "y": 0
-      },
-      "id": 3,
       "options": {
         "colorMode": "background",
         "graphMode": "none",
@@ -203,28 +207,35 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto",
+        "textMode": "value",
         "wideLayout": true
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
           "expr": "wso2_exporter_poll_success",
           "instant": true,
-          "legendFormat": "poll",
+          "range": false,
+          "legendFormat": "__auto",
           "refId": "A"
         }
-      ],
-      "title": "Exporter poll OK",
-      "type": "stat"
+      ]
     },
     {
+      "id": 4,
+      "type": "stat",
+      "title": "Data age",
+      "description": "Seconds since the last successful Loki poll. Grows when the exporter or Loki is down.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Seconds since the last successful Loki poll; grows when the exporter or Loki is down.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -252,13 +263,6 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 18,
-        "y": 0
-      },
-      "id": 4,
       "options": {
         "colorMode": "background",
         "graphMode": "none",
@@ -271,28 +275,35 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto",
+        "textMode": "value",
         "wideLayout": true
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
           "expr": "time() - wso2_exporter_last_success_timestamp_seconds",
           "instant": true,
-          "legendFormat": "data age",
+          "range": false,
+          "legendFormat": "__auto",
           "refId": "A"
         }
-      ],
-      "title": "Data age",
-      "type": "stat"
+      ]
     },
     {
+      "id": 5,
+      "type": "table",
+      "title": "Endpoint status",
+      "description": "One row per endpoint: current state, last suspension timestamp, suspensions inside the selected time range and the lifetime counter. Status is derived from wso2_endpoint_suspended.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Current status of every tracked endpoint. ACTIVE = no suspension event inside the exporter window; SUSPENDED = suspension event seen (see exporter 'mode').",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -307,16 +318,13 @@
             "inspect": false
           },
           "mappings": [],
+          "noValue": "—",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "text",
                 "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
               }
             ]
           }
@@ -325,48 +333,20 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Value"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "options": "Status"
-              },
-              {
-                "id": "custom.cellOptions",
-                "options": {
-                  "type": "color-text"
-                }
-              },
-              {
-                "id": "mappings",
-                "options": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "text": "ACTIVE"
-                      },
-                      "1": {
-                        "color": "red",
-                        "text": "SUSPENDED"
-                      }
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "endpoint"
             },
             "properties": [
               {
                 "id": "displayName",
-                "options": "Endpoint"
+                "value": "Endpoint"
+              },
+              {
+                "id": "custom.width",
+                "value": 250
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
               }
             ]
           },
@@ -378,19 +358,123 @@
             "properties": [
               {
                 "id": "displayName",
-                "options": "Address"
+                "value": "Address"
+              },
+              {
+                "id": "custom.width",
+                "value": 320
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Status"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "color": "green",
+                        "text": "ACTIVE",
+                        "index": 0
+                      },
+                      "1": {
+                        "color": "red",
+                        "text": "SUSPENDED",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Last SUSPENDED"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.width",
+                "value": 185
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Suspensions (range)"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #D"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Suspensions (total)"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 175
               }
             ]
           }
         ]
       },
-      "gridPos": {
-        "h": 9,
-        "w": 14,
-        "x": 0,
-        "y": 6
-      },
-      "id": 5,
       "options": {
         "cellHeight": "sm",
         "footer": {
@@ -409,26 +493,89 @@
           }
         ]
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
           "expr": "wso2_endpoint_suspended{endpoint=~\"$endpoint\"}",
           "format": "table",
           "instant": true,
+          "range": false,
           "legendFormat": "",
           "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "sum by (endpoint) ((wso2_endpoint_last_suspended_timestamp_seconds{endpoint=~\"$endpoint\"} > 0) * 1000)",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "sum by (endpoint) (increase(wso2_endpoint_suspension_events_total{endpoint=~\"$endpoint\"}[$__range]))",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "sum by (endpoint) (wso2_endpoint_suspension_events_total{endpoint=~\"$endpoint\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "D"
         }
       ],
-      "title": "Endpoint status",
-      "type": "table"
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "endpoint",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "endpoint": 0,
+              "address": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5
+            },
+            "renameByName": {}
+          }
+        }
+      ]
     },
     {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Suspension timeline",
+      "description": "Binary suspension state over time (1 = SUSPENDED, 0 = ACTIVE), one step line per endpoint.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Binary suspension state over time (1 = SUSPENDED) per endpoint.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -442,7 +589,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 25,
+            "fillOpacity": 15,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -468,15 +615,19 @@
           },
           "mappings": [
             {
+              "type": "value",
               "options": {
                 "0": {
-                  "text": "ACTIVE"
+                  "color": "green",
+                  "text": "ACTIVE",
+                  "index": 0
                 },
                 "1": {
-                  "text": "SUSPENDED"
+                  "color": "red",
+                  "text": "SUSPENDED",
+                  "index": 1
                 }
-              },
-              "type": "value"
+              }
             }
           ],
           "max": 1,
@@ -498,13 +649,6 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 9,
-        "w": 10,
-        "x": 14,
-        "y": 6
-      },
-      "id": 6,
       "options": {
         "legend": {
           "calcs": [],
@@ -514,28 +658,35 @@
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
         }
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
           "expr": "max by (endpoint) (wso2_endpoint_suspended{endpoint=~\"$endpoint\"})",
           "instant": false,
+          "range": true,
           "legendFormat": "{{endpoint}}",
           "refId": "A"
         }
-      ],
-      "title": "Suspension timeline",
-      "type": "timeseries"
+      ]
     },
     {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Suspension events per hour",
+      "description": "How many 'marked SUSPENDED' log events arrived per hour, stacked per endpoint.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "How many 'marked SUSPENDED' log events arrived per hour, per endpoint.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -549,7 +700,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "bars",
-            "fillOpacity": 60,
+            "fillOpacity": 70,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -558,7 +709,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 0,
             "pointSize": 3,
             "scaleDistribution": {
               "type": "linear"
@@ -588,13 +739,6 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 9,
-        "w": 12,
-        "x": 0,
-        "y": 15
-      },
-      "id": 7,
       "options": {
         "legend": {
           "calcs": [],
@@ -607,25 +751,107 @@
           "sort": "desc"
         }
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
           "expr": "sum by (endpoint) (increase(wso2_endpoint_suspension_events_total{endpoint=~\"$endpoint\"}[1h]))",
           "instant": false,
+          "range": true,
           "legendFormat": "{{endpoint}}",
           "refId": "A"
         }
-      ],
-      "title": "Suspension events per hour",
-      "type": "timeseries"
+      ]
     },
     {
+      "id": 8,
+      "type": "bargauge",
+      "title": "Top endpoints by suspensions",
+      "description": "Endpoints with the most suspension events inside the selected time range (top 10).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "When each endpoint was suspended the last time (from Loki log timestamps).",
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "text": {
+          "titleSize": 14,
+          "valueSize": 14
+        },
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "topk(10, sum by (endpoint) (increase(wso2_endpoint_suspension_events_total{endpoint=~\"$endpoint\"}[$__range])))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{endpoint}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Last suspension time",
+      "description": "When each endpoint was suspended the last time, how long ago that was, and the lifetime suspension counter.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 10,
+        "y": 26
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -640,6 +866,7 @@
             "inspect": false
           },
           "mappings": [],
+          "noValue": "—",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -648,22 +875,9 @@
                 "value": null
               }
             ]
-          },
-          "unit": "dateTimeAsIso"
+          }
         },
         "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "options": "Last SUSPENDED"
-              }
-            ]
-          },
           {
             "matcher": {
               "id": "byName",
@@ -672,7 +886,15 @@
             "properties": [
               {
                 "id": "displayName",
-                "options": "Endpoint"
+                "value": "Endpoint"
+              },
+              {
+                "id": "custom.width",
+                "value": 230
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
               }
             ]
           },
@@ -684,19 +906,60 @@
             "properties": [
               {
                 "id": "displayName",
-                "options": "Address"
+                "value": "Address"
+              },
+              {
+                "id": "custom.width",
+                "value": 280
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Last SUSPENDED"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Ago"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              },
+              {
+                "id": "custom.width",
+                "value": 115
               }
             ]
           }
         ]
       },
-      "gridPos": {
-        "h": 9,
-        "w": 12,
-        "x": 12,
-        "y": 15
-      },
-      "id": 8,
       "options": {
         "cellHeight": "sm",
         "footer": {
@@ -711,23 +974,57 @@
         "sortBy": [
           {
             "desc": true,
-            "displayName": "Value"
+            "displayName": "Last SUSPENDED"
           }
         ]
       },
-      "pluginVersion": "10.4.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "wso2_endpoint_last_suspended_timestamp_seconds{endpoint=~\"$endpoint\"} > 0",
+          "expr": "(wso2_endpoint_last_suspended_timestamp_seconds{endpoint=~\"$endpoint\"} > 0) * 1000",
           "format": "table",
           "instant": true,
+          "range": false,
           "legendFormat": "",
           "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "sum by (endpoint) ((wso2_endpoint_last_suspended_timestamp_seconds{endpoint=~\"$endpoint\"} > 0) * 1000)",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "B"
         }
       ],
-      "title": "Last suspension time",
-      "type": "table"
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "endpoint",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "endpoint": 0,
+              "address": 1,
+              "Value #A": 2,
+              "Value #B": 3
+            },
+            "renameByName": {}
+          }
+        }
+      ]
     }
   ],
   "refresh": "30s",

@@ -246,16 +246,25 @@ wso2_endpoint_last_suspended_timestamp_seconds > 0
    [`grafana/wso2-endpoint-status-dashboard.json`](grafana/wso2-endpoint-status-dashboard.json),
    select your Prometheus datasource when prompted.
 2. Panels:
-   * **Endpoints SUSPENDED now** - red as soon as something is suspended;
-   * **Endpoint status** - the table (ACTIVE/SUSPENDED per endpoint);
+   * stats **Endpoints SUSPENDED now** / **Tracked endpoints** /
+     **Exporter poll OK** / **Data age** - the one-glance health strip;
+   * **Endpoint status** - one row per endpoint: address, ACTIVE/SUSPENDED,
+     last suspension time (ISO), suspensions inside the selected time range
+     and the lifetime counter. The table joins four instant queries on the
+     `endpoint` label;
    * **Suspension timeline** - binary state over time, step line per endpoint;
-   * **Suspension events per hour** - failure activity;
-   * **Last suspension time** - when each endpoint failed the last time;
-   * stats **Exporter poll OK** / **Data age** - so you notice when the data
-     itself is stale instead of trusting a silent zero.
+   * **Suspension events per hour** - failure activity, stacked per endpoint;
+   * **Top endpoints by suspensions** - the ten noisiest endpoints inside the
+     selected time range;
+   * **Last suspension time** - absolute timestamp plus "x ago" per endpoint.
 
-The dashboard uses only the three `wso2_endpoint_*` metrics, so it also works
-if you renamed nothing in `config.ini`.
+The `Endpoint` variable filters every panel (`All` by default). The dashboard
+uses only the three `wso2_endpoint_*` metrics plus the `wso2_exporter_*`
+self-metrics, so it also works if you renamed nothing in `config.ini`.
+
+Timestamps are exposed by the exporter as Unix **seconds**; the table queries
+multiply them by 1000 and the field unit is `dateTimeAsIso` (Grafana expects
+milliseconds). Keep that in mind if you edit the `Last SUSPENDED` columns.
 
 ---
 
